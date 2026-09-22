@@ -2,8 +2,10 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { API_BASE } from '@/config'
+import { useMpesa } from '@/composables/useMpesa'
 
 const router = useRouter()
+const { loading: mpesaLoading, stkPushed, checkoutRequestId, polling, initiateStkPush, pollStkPush, stopPolling } = useMpesa()
 
 const orders = ref([])
 const loading = ref(true)
@@ -41,7 +43,7 @@ function getPaymentStatus(order) {
 
 /*
 |--------------------------------------------------------------------------
-| Pay for an existing pending order
+| Pay for an existing pending order (M-Pesa STK Push)
 |--------------------------------------------------------------------------
 */
 
@@ -57,83 +59,34 @@ async function payOrder(order) {
     return
   }
 
-  const token = localStorage.getItem('token')
-
-  if (!token) {
-    router.push('/login')
-    return
-  }
-
   payingId.value = order.id
   error.value = ''
   paymentMessage.value = ''
 
   try {
-    const response = await fetch(
-      `${API_BASE}/payments/${payment.id}/demo-pay`,
-      {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${token}`,
+    const result = await initiateStkPush(payment.id)
+
+    if (result.success) {
+      paymentMessage.value = result.customerMessage || 'STK Push sent! Please enter your M-Pesa PIN on your phone.'
+
+      await pollStkPush(
+        payment.id,
+        async (pollResult) => {
+          paymentMessage.value = 'Payment successful!'
+          await fetchOrders()
+          setTimeout(() => {
+            paymentMessage.value = ''
+            payingId.value = null
+          }, 3000)
         },
-      }
-    )
-
-    const text = await response.text()
-
-    let data
-
-    try {
-      data = JSON.parse(text)
-    } catch {
-      data = null
-    }
-
-    if (!response.ok) {
-      if (response.status === 401) {
-        localStorage.removeItem('token')
-        localStorage.removeItem('user')
-        router.push('/login')
-        return
-      }
-
-      throw new Error(
-        data?.message ||
-        data?.error ||
-        text ||
-        `Payment failed with status ${response.status}`
+        (err) => {
+          error.value = err.message
+          payingId.value = null
+        }
       )
     }
-
-    /*
-     * Update the payment in the current order immediately.
-     */
-    if (data?.payment) {
-      order.payment = data.payment
-    } else {
-      order.payment.payment_status = 'paid'
-    }
-
-    paymentMessage.value =
-      `Payment successful for Order #${order.id}.`
-
-    /*
-     * Refresh the orders from Laravel so the page reflects
-     * the actual database state.
-     */
-    await fetchOrders()
-
-    /*
-     * Remove the success message after a short time.
-     */
-    setTimeout(() => {
-      paymentMessage.value = ''
-    }, 3000)
-
   } catch (err) {
     error.value = err.message || 'Payment failed.'
-  } finally {
     payingId.value = null
   }
 }
@@ -401,18 +354,26 @@ async function fetchOrders() {
           </div>
 
           <!-- Pending Payment -->
-          <button
-            v-if="getPaymentStatus(order) === 'pending'"
-            class="btn btn-pay"
-            :disabled="payingId === order.id"
-            @click="payOrder(order)"
-          >
-            {{
-              payingId === order.id
-                ? 'Processing...'
-                : '💳 Pay Now'
-            }}
-          </button>
+          <div v-if="getPaymentStatus(order) === 'pending'">
+            <!-- M-Pesa Polling Status for this order -->
+            <div v-if="payingId === order.id && (stkPushed && polling)" class="mpesa-polling-inline">
+              <div class="polling-spinner-small"></div>
+              <span>Waiting for M-Pesa PIN... ({{ checkoutRequestId }})</span>
+            </div>
+            <div v-else-if="payingId === order.id && stkPushed && !polling" class="mpesa-polling-inline">
+              <div class="polling-spinner-small"></div>
+              <span>Checking payment status...</span>
+            </div>
+            <button
+              v-else
+              class="btn btn-pay"
+              :disabled="payingId === order.id || mpesaLoading"
+              @click="payOrder(order)"
+            >
+              <span v-if="payingId === order.id || mpesaLoading" class="btn-spinner"></span>
+              {{ (payingId === order.id || mpesaLoading) ? 'Sending STK Push...' : '📱 Pay with M-Pesa' }}
+            </button>
+          </div>
 
           <!-- Paid Payment -->
           <div
@@ -808,6 +769,41 @@ async function fetchOrders() {
   background: #fdecec;
   color: #b42318;
   font-weight: 700;
+}
+
+/* M-Pesa Polling Inline */
+.mpesa-polling-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: #f0f7ff;
+  border-radius: 8px;
+  color: #0066cc;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.mpesa-polling-inline .polling-spinner-small {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #d0e6ff;
+  border-top: 2px solid #0066cc;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* Flutterwave Loading */
+.btn-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 0.5rem;
+  border: 2px solid #ffffff;
+  border-top: 2px solid transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
 }
 
 /* Responsive */

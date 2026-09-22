@@ -10,6 +10,8 @@ import Products from '@/components/Products.vue'
 import ProductDetails from '@/components/ProductDetails.vue'
 import Cart from '@/components/Cart.vue'
 import NotFound from '@/components/NotFound.vue'
+import PaymentSuccess from '@/components/PaymentSuccess.vue'
+import PaymentCancel from '@/components/PaymentCancel.vue'
 
 function requireAuth() {
   const token = localStorage.getItem('token')
@@ -73,6 +75,16 @@ const router = createRouter({
       path: '/product-details/:id',
       name: 'product-details',
       component: ProductDetails,
+    },
+    {
+      path: '/payment/success',
+      name: 'payment-success',
+      component: PaymentSuccess,
+    },
+    {
+      path: '/payment/cancel',
+      name: 'payment-cancel',
+      component: PaymentCancel,
     },
     {
       path: '/:pathMatch(.*)*',

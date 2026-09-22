@@ -3,9 +3,11 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { API_BASE } from '@/config'
 import { useCart } from '@/composables/useCart'
+import { useMpesa } from '@/composables/useMpesa'
 
 const router = useRouter()
 const { items, count, total, remove, updateQuantity, clear } = useCart()
+const { loading: mpesaLoading, error: mpesaError, stkPushed, checkoutRequestId, polling, initiateStkPush, pollStkPush, stopPolling } = useMpesa()
 
 const loading = ref(false)
 const paying = ref(false)
@@ -91,7 +93,7 @@ async function checkout() {
         /*
          * Each order has a payment created by Laravel.
          *
-         * For now we use the first payment as the demo
+         * For now we use the first payment for the Flutterwave
          * payment shown to the customer.
          */
         if (data.order.payment && !payment.value) {
@@ -103,7 +105,7 @@ async function checkout() {
     /*
      * Don't clear the cart yet.
      *
-     * We want the customer to complete the demo payment first.
+     * We want the customer to complete the Flutterwave payment first.
      */
     success.value = 'Order created successfully. Please complete payment.'
   } catch (err) {
@@ -115,7 +117,7 @@ async function checkout() {
 
 /*
 |--------------------------------------------------------------------------
-| Demo Payment
+| M-Pesa STK Push Payment
 |--------------------------------------------------------------------------
 */
 
@@ -129,58 +131,34 @@ async function payNow() {
   error.value = ''
   success.value = ''
 
-  const token = localStorage.getItem('token')
-
-  if (!token) {
-    router.push('/login')
-    return
-  }
-
   try {
-    const response = await fetch(
-      `${API_BASE}/payments/${payment.value.id}/demo-pay`,
-      {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Authorization': `Bearer ${token}`,
+    // Initiate STK Push
+    const result = await initiateStkPush(payment.value.id)
+
+    if (result.success) {
+      success.value = result.customerMessage || 'STK Push sent! Please enter your M-Pesa PIN on your phone.'
+
+      // Poll for completion
+      await pollStkPush(
+        payment.value.id,
+        (pollResult) => {
+          // Payment completed successfully
+          clear()
+          success.value = 'Payment successful! Your order has been paid.'
+
+          setTimeout(() => {
+            router.push('/orders')
+          }, 2000)
         },
-      }
-    )
-
-    const data = await response.json().catch(() => ({}))
-
-    if (!response.ok) {
-      throw new Error(
-        data.message ||
-        data.error ||
-        'Demo payment failed'
+        (err) => {
+          // Payment failed or timed out
+          error.value = err.message
+          paying.value = false
+        }
       )
     }
-
-    /*
-     * Update payment with the response from Laravel.
-     */
-    payment.value = data.payment
-
-    /*
-     * Payment succeeded, so now we can clear the cart.
-     */
-    clear()
-
-    success.value = 'Payment successful! Your order has been paid.'
-
-    /*
-     * Give the customer a moment to see the success message,
-     * then take them to Orders.
-     */
-    setTimeout(() => {
-      router.push('/orders')
-    }, 1800)
-
   } catch (err) {
     error.value = err.message || 'Payment failed.'
-  } finally {
     paying.value = false
   }
 }
@@ -420,13 +398,26 @@ async function payNow() {
           {{ success }}
         </p>
 
+        <!-- M-Pesa STK Push Status -->
+        <div v-if="stkPushed && polling" class="mpesa-polling">
+          <div class="polling-spinner"></div>
+          <p>Waiting for you to enter M-Pesa PIN...</p>
+          <p class="polling-hint">Checkout Request: {{ checkoutRequestId }}</p>
+        </div>
+
+        <div v-else-if="stkPushed && !polling && payment.payment_status === 'pending'" class="mpesa-polling">
+          <div class="polling-spinner"></div>
+          <p>Checking payment status...</p>
+        </div>
+
         <button
-          v-if="payment.payment_status === 'pending'"
+          v-else-if="payment.payment_status === 'pending' && !stkPushed"
           @click="payNow"
-          :disabled="paying"
+          :disabled="paying || mpesaLoading"
           class="btn btn-pay"
         >
-          {{ paying ? 'Processing Payment...' : '💳 Pay Now' }}
+          <span v-if="paying || mpesaLoading" class="btn-spinner"></span>
+          {{ (paying || mpesaLoading) ? 'Sending STK Push...' : '📱 Pay with M-Pesa' }}
         </button>
 
         <div
@@ -715,6 +706,41 @@ async function payNow() {
   color: #721c24;
 }
 
+/* Flutterwave Loading */
+.fw-loading {
+  text-align: center;
+  padding: 2rem;
+  color: #666;
+}
+
+.fw-loading .spinner {
+  width: 40px;
+  height: 40px;
+  margin: 0 auto 1rem;
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #667eea;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.btn-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 0.5rem;
+  border: 2px solid #ffffff;
+  border-top: 2px solid transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -799,6 +825,42 @@ async function payNow() {
   border-radius: 10px;
   font-weight: 700;
   margin-bottom: 0.75rem;
+}
+
+/* M-Pesa Polling */
+.mpesa-polling {
+  text-align: center;
+  padding: 2rem;
+  background: #f0f7ff;
+  border-radius: 12px;
+  margin: 1rem 0;
+  border: 1px solid #d0e6ff;
+}
+
+.mpesa-polling .polling-spinner {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 1rem;
+  border: 4px solid #d0e6ff;
+  border-top: 4px solid #0066cc;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.mpesa-polling p {
+  color: #0066cc;
+  margin: 0.5rem 0;
+  font-weight: 500;
+}
+
+.mpesa-polling .polling-hint {
+  font-size: 0.8rem;
+  color: #666;
+  font-family: monospace;
+  background: #e8f0fe;
+  padding: 0.5rem;
+  border-radius: 6px;
+  margin-top: 1rem;
 }
 
 @media (max-width: 800px) {
