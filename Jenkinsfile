@@ -5,10 +5,6 @@ pipeline {
         nodejs 'NodeJS-20'
     }
 
-    environment {
-        NODE_ENV = 'production'
-    }
-
     stages {
 
         stage('Checkout') {
